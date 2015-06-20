@@ -353,7 +353,7 @@ void run_charger(void) {
         pwm = PWM_MAX;                                      // the charger is less efficient at 99% duty cycle
         set_pwm_duty();                                     // write the PWM
       }
-      else if (bat_volts < (BATT_FLOAT - 0.1)) {            // else if the battery voltage is less than the float voltage - 0.1
+      else if (bat_volts < BATT_FLOAT) {                    // else if the battery voltage is less than the float voltage - 0.1
         pwm = PWM_MAX;                                      
         set_pwm_duty();	                                    // start charging again
         TURN_ON_MOSFETS; 		
@@ -385,7 +385,7 @@ void run_charger(void) {
 //----------------------------------------------------------------------------------------------------------------------  
   
 void load_control(){
-  if ((sol_watts < MIN_SOL_WATTS) && (bat_volts > LVD)){    // If the panel isn't producing, it's probably night
+  if ((sol_watts < MIN_SOL_WATTS) && (bat_volts > LVD)){   // If the panel isn't producing, it's probably night
     digitalWrite(LOAD_PIN, LOW);                           // turn the load on
     load_status = 1;                                       // record that the load is on
   }
@@ -570,8 +570,8 @@ void lcd_display()
 }
 
 void backLight_timer(){
-  if((millis() - time) <= 15000) // if it's been less than the 15 secs, turn the backlight on
-      lcd.backlight();           // finish with backlight on  
+  if((millis() - time) <= 15000)         // if it's been less than the 15 secs, turn the backlight on
+      lcd.backlight();                   // finish with backlight on  
   else 
-      lcd.noBacklight();         // if it's been more than 15 secs, turn the backlight off
+      lcd.noBacklight();                 // if it's been more than 15 secs, turn the backlight off
 }
