@@ -54,10 +54,10 @@
 ///////// Definitions /////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-#define SOL_VOLTS_CHAN 0               // defining the adc channel to read solar volts
-#define SOL_AMPS_CHAN 1                // Defining the adc channel to read solar amps
-#define BAT_VOLTS_CHAN 2               // defining the adc channel to read battery volts
-#define AVG_NUM 8                      // number of iterations of the adc routine to average the adc readings
+#define SOL_VOLTS_CHAN 0                   // defining the adc channel to read solar volts
+#define SOL_AMPS_CHAN 1                    // Defining the adc channel to read solar amps
+#define BAT_VOLTS_CHAN 2                   // defining the adc channel to read battery volts
+#define AVG_NUM 8                          // number of iterations of the adc routine to average the adc readings
 
 // ACS 712 Current Sensor is used. Current Measured = (5/(1024 *0.185))*ADC - (2.5/0.185) 
 
@@ -65,13 +65,13 @@
 #define SOL_VOLTS_SCALE 0.029296875        // the scaling value for raw adc reading to get solar volts  // (5/1024)*(R1+R2)/R2 // R1=100k and R2=20k
 #define BAT_VOLTS_SCALE 0.029296875        // the scaling value for raw adc reading to get battery volts 
 
-#define PWM_PIN 9                    // the output pin for the pwm (only pin 9 avaliable for timer 1 at 50kHz)
-#define PWM_ENABLE_PIN 8            // pin used to control shutoff function of the IR2104 MOSFET driver (hight the mosfet driver is on)
-#define PWM_FULL 1023                // the actual value used by the Timer1 routines for 100% pwm duty cycle
-#define PWM_MAX 100                  // the value for pwm duty cyle 0-100%
-#define PWM_MIN 60                  // the value for pwm duty cyle 0-100% (below this value the current running in the system is = 0)
-#define PWM_START 90                // the value for pwm duty cyle 0-100%
-#define PWM_INC 1                    //the value the increment to the pwm value for the ppt algorithm
+#define PWM_PIN 9                          // the output pin for the pwm (only pin 9 avaliable for timer 1 at 50kHz)
+#define PWM_ENABLE_PIN 8                   // pin used to control shutoff function of the IR2104 MOSFET driver (hight the mosfet driver is on)
+#define PWM_FULL 1023                      // the actual value used by the Timer1 routines for 100% pwm duty cycle
+#define PWM_MAX 100                        // the value for pwm duty cyle 0-100%
+#define PWM_MIN 60                         // the value for pwm duty cyle 0-100% (below this value the current running in the system is = 0)
+#define PWM_START 90                       // the value for pwm duty cyle 0-100%
+#define PWM_INC 1                          // the value the increment to the pwm value for the ppt algorithm
 
 #define TRUE 1
 #define FALSE 0
@@ -81,16 +81,16 @@
 #define TURN_ON_MOSFETS digitalWrite(PWM_ENABLE_PIN, HIGH)      // enable MOSFET driver
 #define TURN_OFF_MOSFETS digitalWrite(PWM_ENABLE_PIN, LOW)      // disable MOSFET driver
 
-#define ONE_SECOND 50000            //count for number of interrupt in 1 second on interrupt period of 20us
+#define ONE_SECOND 50000                   // count for number of interrupt in 1 second on interrupt period of 20us
 
-#define LOW_SOL_WATTS 5.00          //value of solar watts // this is 5.00 watts
-#define MIN_SOL_WATTS 1.00          //value of solar watts // this is 1.00 watts
-#define MIN_BAT_VOLTS 11.00         //value of battery voltage // this is 11.00 volts          
-#define MAX_BAT_VOLTS 14.10         //value of battery voltage// this is 14.10 volts
-#define BATT_FLOAT 13.60            // battery voltage we want to stop charging at
-#define HIGH_BAT_VOLTS 13.00        //value of battery voltage // this is 13.00 volts 
-#define LVD 11.5                    //Low voltage disconnect setting for a 12V system
-#define OFF_NUM 9                   // number of iterations of off charger state
+#define LOW_SOL_WATTS 5.00                 // value of solar watts // this is 5.00 watts
+#define MIN_SOL_WATTS 1.00                 // value of solar watts // this is 1.00 watts
+#define MIN_BAT_VOLTS 11.00                // value of battery voltage // this is 11.00 volts          
+#define MAX_BAT_VOLTS 14.10                // value of battery voltage// this is 14.10 volts
+#define BATT_FLOAT 13.60                   // battery voltage we want to stop charging at
+#define HIGH_BAT_VOLTS 13.00               // value of battery voltage // this is 13.00 volts 
+#define LVD 11.5                           // Low voltage disconnect setting for a 12V system
+#define OFF_NUM 9                          // number of iterations of off charger state
   
 //------------------------------------------------------------------------------------------------------
 //Defining led pins for indication
@@ -150,7 +150,9 @@ float sol_amps;                       // solar amps
 float sol_volts;                      // solar volts 
 float bat_volts;                      // battery volts 
 float sol_watts;                      // solar watts
-float old_sol_watts = 0;              // solar watts from previous time through ppt routine 
+float old_sol_watts = 0;              // solar watts from previous time through ppt routine
+float loaded_volts = 0;               // variable for storing battery voltage under load
+float deltaV = 0;                     // vairable for storing the difference of voltage when under load
 unsigned int seconds = 0;             // seconds from timer routine
 unsigned int prev_seconds = 0;        // seconds value from previous pass
 unsigned int interrupt_counter = 0;   // counter for 20us interrrupt
@@ -159,6 +161,7 @@ int delta = PWM_INC;                  // variable used to modify pwm duty cycle 
 int pwm = 0;                          // pwm duty cycle 0-100%
 int back_light_pin_State = 0;         // variable for storing the state of the backlight button
 int load_status = 0;                  // variable for storing the load output state (for writing to LCD)
+int prev_load_status = 0;             // to see when the load has been turned on
   
 enum charger_mode {off, on, bulk, bat_float} charger_state;    // enumerated variable that holds state for charger state machine
 // set the LCD address to 0x27 for a 20 chars 4 line display
@@ -385,14 +388,23 @@ void run_charger(void) {
 //----------------------------------------------------------------------------------------------------------------------  
   
 void load_control(){
-  if ((sol_watts < MIN_SOL_WATTS) && (bat_volts > LVD)){   // If the panel isn't producing, it's probably night
-    digitalWrite(LOAD_PIN, LOW);                           // turn the load on
-    load_status = 1;                                       // record that the load is on
+  if ((sol_watts < MIN_SOL_WATTS) && (bat_volts > (LVD - deltaV))){// If the panel isn't producing, it's probably night
+    load_status = 1;                                               // record that the load is on
   }
-  else{                                                    // If the panel is producing, it's day time
-    digitalWrite(LOAD_PIN, HIGH);                          // turn the load off
-    load_status = 0;                                       // record that the load is off
+  else if (bat_volts < (LVD - deltaV)){                            // If the battery voltage drops below the low voltage threshold
+    digitalWrite(LOAD_PIN, HIGH);                                  // turn the load off
+    load_status = 0;                                               // record that the load is off
+  }  
+  else if (sol_watts > MIN_SOL_WATTS){                             // If the panel is producing, it's day time
+    digitalWrite(LOAD_PIN, HIGH);                                  // turn the load off
+    load_status = 0;                                               // record that the load is off
   }
+  if ((load_status = 1) && (prev_load_status = 0)){                // If the load status has changed from off to on
+    digitalWrite(LOAD_PIN, LOW);                                   // turn the load on
+    loaded_volts = read_adc(BAT_VOLTS_CHAN) * BAT_VOLTS_SCALE;     // input of battery volts under load
+    deltaV = (bat_volts - loaded_volts);                           // record the difference in voltage
+  }
+  prev_load_status = load_status;                                  // save the load status
 }
 
 //------------------------------------------------------------------------------------------------------
