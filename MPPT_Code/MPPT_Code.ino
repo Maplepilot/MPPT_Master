@@ -1,5 +1,5 @@
 //----------------------------------------------------------------------------------------------------
-// ARDUINO MPPT SOLAR CHARGE CONTROLLER (Version-3) 
+//  ARDUINO MPPT SOLAR CHARGE CONTROLLER (Version-3) 
 //  Author: Debasish Dutta/deba168
 //          www.opengreenenergy.com
 //
@@ -7,7 +7,9 @@
 //  This code is a modified version of sample code from www.timnolan.com
 //  dated 08/02/2015
 //
-//  Mods by Aplavins 06/19/2015 
+//  Mods by Aplavins 01/07/2015
+//
+//  Size batteries and panels appropriately. Larger panels need larger batteries and vice versa.
 
 ////  Specifications :  //////////////////////////////////////////////////////////////////////////////////////////////////////
                                                                                                                             //
@@ -26,7 +28,7 @@
 
 
 
-#include "TimerOne.h"                // using Timer1 library from http://www.arduino.cc/playground/Code/Timer1
+#include "TimerOne.h"               // using Timer1 library from http://www.arduino.cc/playground/Code/Timer1
 #include <LiquidCrystal_I2C.h>      // using the LCD I2C Library from https://bitbucket.org/fmalpartida/new-liquidcrystal/downloads
 #include <Wire.h>  
 
@@ -67,30 +69,17 @@
 
 #define PWM_PIN 9                          // the output pin for the pwm (only pin 9 avaliable for timer 1 at 50kHz)
 #define PWM_ENABLE_PIN 8                   // pin used to control shutoff function of the IR2104 MOSFET driver (hight the mosfet driver is on)
-#define PWM_FULL 1023                      // the actual value used by the Timer1 routines for 100% pwm duty cycle
-#define PWM_MAX 100                        // the value for pwm duty cyle 0-100%
-#define PWM_MIN 60                         // the value for pwm duty cyle 0-100% (below this value the current running in the system is = 0)
-#define PWM_START 90                       // the value for pwm duty cyle 0-100%
-#define PWM_INC 1                          // the value the increment to the pwm value for the ppt algorithm
-
-#define TRUE 1
-#define FALSE 0
-#define ON TRUE
-#define OFF FALSE
 
 #define TURN_ON_MOSFETS digitalWrite(PWM_ENABLE_PIN, HIGH)      // enable MOSFET driver
 #define TURN_OFF_MOSFETS digitalWrite(PWM_ENABLE_PIN, LOW)      // disable MOSFET driver
 
 #define ONE_SECOND 50000                   // count for number of interrupt in 1 second on interrupt period of 20us
 
-#define LOW_SOL_WATTS 5.00                 // value of solar watts // this is 5.00 watts
-#define MIN_SOL_WATTS 1.00                 // value of solar watts // this is 1.00 watts
-#define MIN_BAT_VOLTS 11.00                // value of battery voltage // this is 11.00 volts          
-#define MAX_BAT_VOLTS 14.10                // value of battery voltage// this is 14.10 volts
-#define BATT_FLOAT 13.60                   // battery voltage we want to stop charging at
-#define HIGH_BAT_VOLTS 13.00               // value of battery voltage // this is 13.00 volts 
-#define LVD 11.5                           // Low voltage disconnect setting for a 12V system
+#define MAX_BAT_VOLTS 15.0                 // we don't want the battery going any higher than this
+#define BAT_FLOAT 13.6                     // battery voltage we want to stop charging at
+#define LVD 11.5                           // Low voltage disconnect
 #define OFF_NUM 9                          // number of iterations of off charger state
+
   
 //------------------------------------------------------------------------------------------------------
 //Defining led pins for indication
@@ -157,13 +146,14 @@ unsigned int seconds = 0;             // seconds from timer routine
 unsigned int prev_seconds = 0;        // seconds value from previous pass
 unsigned int interrupt_counter = 0;   // counter for 20us interrrupt
 unsigned long time = 0;               // variable to store time the back light control button was pressed in millis
-int delta = PWM_INC;                  // variable used to modify pwm duty cycle for the ppt algorithm
-int pwm = 0;                          // pwm duty cycle 0-100%
+int pulseWidth = 512;                 // pwm duty cycle 0-1024
+int pwm = 0;                          // mapped value of pulseWidth in %
 int back_light_pin_State = 0;         // variable for storing the state of the backlight button
 int load_status = 0;                  // variable for storing the load output state (for writing to LCD)
 int prev_load_status = 0;             // to see when the load has been turned on
+int trackDirection = 1;               // step amount to change the value of pulseWidth used by MPPT algorithm
   
-enum charger_mode {off, on, bulk, bat_float} charger_state;    // enumerated variable that holds state for charger state machine
+enum charger_mode {no_battery, sleep, bulk, Float, error} charger_state;  // enumerated variable that holds state for charger state machine
 // set the LCD address to 0x27 for a 20 chars 4 line display
 // Set the pins on the I2C chip used for LCD connections:
 //                    addr, en,rw,rs,d4,d5,d6,d7,bl,blpol
@@ -180,13 +170,11 @@ void setup()                           // run once, when the sketch starts
   pinMode(LED_GREEN, OUTPUT);          // sets the digital pin as output
   pinMode(LED_YELLOW, OUTPUT);         // sets the digital pin as output
   pinMode(PWM_ENABLE_PIN, OUTPUT);     // sets the digital pin as output
-  Timer1.initialize(20);               // initialize timer1, and set a 20uS period
-  Timer1.pwm(PWM_PIN, 0);              // setup pwm on pin 9, 0% duty cycle
   TURN_OFF_MOSFETS;                    // turn off MOSFET driver chip
+  Timer1.initialize(20);               // initialize timer1, and set a 20uS period
   Timer1.attachInterrupt(callback);    // attaches callback() as a timer overflow interrupt
   Serial.begin(9600);                  // open the serial port at 38400 bps:
-  pwm = PWM_START;                     // starting value for pwm  
-  charger_state = off;                 // start with charger state as off
+  charger_state = sleep;               // start with charger state as sleep
   pinMode(BACK_LIGHT_PIN, INPUT);      // backlight on button
   pinMode(LOAD_PIN,OUTPUT);            // output for the LOAD MOSFET (LOW = on, HIGH = off)
   digitalWrite(LOAD_PIN,HIGH);         // default load state is OFF
@@ -203,7 +191,8 @@ void setup()                           // run once, when the sketch starts
 void loop()                         
 {
   read_data();                         // read data from inputs
-  run_charger();                       // run the charger state machine
+  mode_select();                       // select the charging state
+  set_charger();                       // run the charger state machine
   print_data();                        // print data
   load_control();                      // control the connected load
   led_output();                        // led indication
@@ -235,11 +224,11 @@ int read_adc(int channel){
 // factor to get actual value in volts or amps. 
 //------------------------------------------------------------------------------------------------------
 void read_data(void) {
-  
-  sol_amps = (read_adc(SOL_AMPS_CHAN) * SOL_AMPS_SCALE -13.51);    //input of solar amps
-  sol_volts = read_adc(SOL_VOLTS_CHAN) * SOL_VOLTS_SCALE;          //input of solar volts 
-  bat_volts = read_adc(BAT_VOLTS_CHAN) * BAT_VOLTS_SCALE;          //input of battery volts 
-  sol_watts = sol_amps * sol_volts ;                               //calculations of solar watts                  
+  old_sol_watts = sol_watts;                                       // save the previous value of sol watts
+  sol_amps = (read_adc(SOL_AMPS_CHAN) * SOL_AMPS_SCALE -13.51);    // input of solar amps
+  sol_volts = read_adc(SOL_VOLTS_CHAN) * SOL_VOLTS_SCALE;          // input of solar volts 
+  bat_volts = read_adc(BAT_VOLTS_CHAN) * BAT_VOLTS_SCALE;          // input of battery volts 
+  sol_watts = sol_amps * sol_volts ;                               // calculations of solar watts                  
 }
 
 //------------------------------------------------------------------------------------------------------
@@ -254,148 +243,81 @@ void callback()
   }
 }
 
-//------------------------------------------------------------------------------------------------------
-// This routine uses the Timer1.pwm function to set the pwm duty cycle.
-//------------------------------------------------------------------------------------------------------
-void set_pwm_duty(void) {
-
-  if (pwm > PWM_MAX) {					   // check limits of PWM duty cyle and set to PWM_MAX
-    pwm = PWM_MAX;		
+void mode_select(){
+  if (bat_volts < 10.0) charger_state = no_battery ;                                           // If battery voltage is below 10, there is no battery connected or dead / wrong battery
+  else if (bat_volts > MAX_BAT_VOLTS) charger_state = error;                                   // If battery voltage is over 15, there's a problem
+  else if ((bat_volts > 10.0) && (bat_volts < MAX_BAT_VOLTS) && (sol_volts > MAX_BAT_VOLTS)){  // If battery voltage is in the normal range and there is light on the panel
+    if (bat_volts >= (BAT_FLOAT-0.1)) charger_state = Float;                                   // If battery voltage is above 13.5, go into float charging
+    else charger_state = bulk;                                                                 // If battery voltage is less than 13.5, go into bulk charging
   }
-  else if (pwm < PWM_MIN) {				   // if pwm is less than PWM_MIN then set it to PWM_MIN
-    pwm = PWM_MIN;
+  else if (sol_volts < MAX_BAT_VOLTS){                                                         // If there's no light on the panel, go to sleep
+    charger_state = sleep;
   }
-  if (pwm < PWM_MAX) {
-    Timer1.pwm(PWM_PIN,(PWM_FULL * (long)pwm / 100), 20);  // use Timer1 routine to set pwm duty cycle at 20uS period
-    //Timer1.pwm(PWM_PIN,(PWM_FULL * (long)pwm / 100));
-  }												
-  else if (pwm == PWM_MAX) {				   // if pwm set to 100% it will be on full but we have 
-    Timer1.pwm(PWM_PIN,(PWM_FULL - 1), 20);                // keep switching so set duty cycle at 99.9% 
-    //Timer1.pwm(PWM_PIN,(PWM_FULL - 1));              
-  }												
-}	
+}
 
-//------------------------------------------------------------------------------------------------------
-// This routine is the charger state machine. It has four states on, off, bulk and float.
-// It's called once each time through the main loop to see what state the charger should be in.
-// The battery charger can be in one of the following four states:
-// 
-//  On State - this is charger state for MIN_SOL_WATTS < solar watts < LOW_SOL_WATTS. In this state isthe solar 
-//      watts input is too low for the bulk charging state but not low enough to go into the off state. 
-//      In this state we just set the pwm = 99.9% to get the most of low amount of power available.
-
-//  Bulk State - this is charger state for solar watts > MIN_SOL_WATTS. This is where we do the bulk of the battery
-//      charging and where we run the Peak Power Tracking alogorithm. In this state we try and run the maximum amount
-//      of current that the solar panels are generating into the battery.
-
-//  Float State - As the battery charges it's voltage rises. When it gets to the MAX_BAT_VOLTS we are done with the 
-//      bulk battery charging and enter the battery float state. In this state we try and keep the battery voltage
-//      at MAX_BAT_VOLTS by adjusting the pwm value. If we get to pwm = 100% it means we can't keep the battery 
-//      voltage at MAX_BAT_VOLTS which probably means the battery is being drawn down by some load so we need to back
-//      into the bulk charging mode.
-
-//  Off State - This is state that the charger enters when solar watts < MIN_SOL_WATTS. The charger goes into this
-//      state when there is no more power being generated by the solar panels. The MOSFETs are turned
-//      off in this state so that power from the battery doesn't leak back into the solar panel. 
-//------------------------------------------------------------------------------------------------------
-void run_charger(void) {
-  
-  static int off_count = OFF_NUM;
-
-  switch (charger_state) {
-    case on:                                        
-      if (sol_watts < MIN_SOL_WATTS) {                      // if watts input from the solar panel is less than
-        charger_state = off;                                // the minimum solar watts then 
-        off_count = OFF_NUM;                                // go to the charger off state
-        TURN_OFF_MOSFETS; 
-      }
-      else if (bat_volts > (BATT_FLOAT - 0.1)) {            // else if the battery voltage has gotten above the float
-        charger_state = bat_float;                          // battery float voltage go to the charger battery float state
-      }
-      else if (sol_watts < LOW_SOL_WATTS) {                 // else if the solar input watts is less than low solar watts
-        pwm = PWM_MAX;                                      // it means there is not much power being generated by the solar panel
-        set_pwm_duty();			                    // so we just set the pwm = 100% so we can get as much of this power as possible
-      }                                                     // and stay in the charger on state
-      else {                                          
-        pwm = ((bat_volts * 10) / (sol_volts / 10)) + 5;    // else if we are making more power than low solar watts figure out what the pwm
-        charger_state = bulk;                               // value should be and change the charger to bulk state 
-      }
+void set_charger(void) {
+    
+  switch (charger_state){                                                                     // skip to the state that is currently set
+    
+    case no_battery:                                                                          // the charger is in the no battery state
+      disable_charger();                                                                      // Disable the MOSFET driver
       break;
-    case bulk:
-      if (sol_watts < MIN_SOL_WATTS) {                      // if watts input from the solar panel is less than
-        charger_state = off;                                // the minimum solar watts then it is getting dark so
-        off_count = OFF_NUM;                                // go to the charger off state
-        TURN_OFF_MOSFETS; 
-      }
-      else if (bat_volts > BATT_FLOAT) {                 // else if the battery voltage has gotten above the float
-        charger_state = bat_float;                          // battery float voltage go to the charger battery float state
-      }
-      else if (sol_watts < LOW_SOL_WATTS) {                 // else if the solar input watts is less than low solar watts
-        charger_state = on;                                 // it means there is not much power being generated by the solar panel
-        TURN_ON_MOSFETS;                                    // so go to charger on state
-      }
-      else {                                                // this is where we do the Peak Power Tracking ro Maximum Power Point algorithm
-        if (old_sol_watts >= sol_watts) {                   // if previous watts are greater change the value of
-          delta = -delta;			            // delta to make pwm increase or decrease to maximize watts
-        }
-        pwm += delta;                                       // add delta to change PWM duty cycle for PPT algorythm (compound addition)
-        old_sol_watts = sol_watts;                          // load old_watts with current watts value for next time
-        set_pwm_duty();				            // set pwm duty cycle to pwm value
-      }
+    
+    case sleep:                                                                               // the charger is in the sleep state
+      pulseWidth = 512;                                                                       // set the duty cycle to 50% for when it comes on again
+      disable_charger();                                                                      // Disable the MOSFET driver
       break;
-    case bat_float:
-
-      if (sol_watts < MIN_SOL_WATTS) {                      // if watts input from the solar panel is less than
-        charger_state = off;                                // the minimum solar watts then it is getting dark so
-        off_count = OFF_NUM;                                // go to the charger off state
-        TURN_OFF_MOSFETS; 
-        set_pwm_duty();					
-      }
-      else if (bat_volts > BATT_FLOAT) {                    // If we've charged the battery abovethe float voltage                
-        TURN_OFF_MOSFETS;                                   // turn off MOSFETs instead of modiflying duty cycle
-        pwm = PWM_MAX;                                      // the charger is less efficient at 99% duty cycle
-        set_pwm_duty();                                     // write the PWM
-      }
-      else if (bat_volts < BATT_FLOAT) {                    // else if the battery voltage is less than the float voltage - 0.1
-        pwm = PWM_MAX;                                      
-        set_pwm_duty();	                                    // start charging again
-        TURN_ON_MOSFETS; 		
-        if (bat_volts < (BATT_FLOAT - 0.1)) {               // if the voltage drops because of added load,
-        charger_state = bulk;                               // switch back into bulk state to keep the voltage up
-        }
-      }
+      
+    case bulk:                                                                                // the charger is in the bulk state
+      PerturbAndObserve();                                                                    // run the MPPT algorithm
+      enable_charger();                                                                       // If battery voltage is below 13.6 enable the MOSFET driver
       break;
-    case off:                                               // when we jump into the charger off state, off_count is set with OFF_NUM
-      TURN_OFF_MOSFETS;
-      if (off_count > 0) {                                  // this means that we run through the off state OFF_NUM of times with out doing
-        off_count--;                                        // anything, this is to allow the battery voltage to settle down to see if the  
-      }                                                     // battery has been disconnected
-      else if ((bat_volts > BATT_FLOAT) && (sol_volts > bat_volts)) {
-        charger_state = bat_float;                          // if battery voltage is still high and solar volts are high
-      }    
-      else if ((bat_volts > MIN_BAT_VOLTS) && (bat_volts < BATT_FLOAT) && (sol_volts > bat_volts)) {
-        charger_state = bulk;
-      }
+      
+    case Float:                                                                               // the charger is in the float state, it uses PWM instead of MPPT
+      pulseWidth = 1022;                                                                      // set the duty cycle to maximum (we don't need MPPT here the battery is charged)
+      if (bat_volts < BAT_FLOAT) enable_charger();                                            // If battery voltage is below 13.6 enable the MOSFET driver
+      else disable_charger();                                                                 // If above, disable the MOSFET driver
       break;
-    default:
-      TURN_OFF_MOSFETS; 
+      
+    case error:                                                                               // if there's something wrong
+      disable_charger();                                                                      // Disable the MOSFET driver
+      break;                                                                                  
+      
+    default:                                                                                  // if none of the other cases are satisfied,
+      disable_charger();                                                                      // Disable the MOSFET driver
       break;
   }
 }
+
+void PerturbAndObserve(){
+  if ((pulseWidth == 300) || (pulseWidth == 1022) || (sol_watts < old_sol_watts)) trackDirection = -trackDirection;  // if pulseWidth has hit one of the ends reverse the track direction
+  pulseWidth = pulseWidth + trackDirection;                                                                          // add (or subtract) track Direction to(from) pulseWidth
+}
+
+void enable_charger() {
+  pulseWidth = constrain (pulseWidth, 300, 1022);               // prevent overflow of pulseWidth and not fully on or off for the charge pump
+  pwm = map(pulseWidth, 0, 1024, 0, 100);                       // use pulseWidth to get a % value and store it in pwm
+  Timer1.pwm(PWM_PIN, pulseWidth, 20);                          // use Timer1 routine to set pwm duty cycle at 20uS period
+  TURN_ON_MOSFETS;						// enable the MOSFET driver																	
+}
+
+void disable_charger() {
+  TURN_OFF_MOSFETS;                                             // disable MOSFET driver
+}	
 
 //----------------------------------------------------------------------------------------------------------------------
 /////////////////////////////////////////////LOAD CONTROL/////////////////////////////////////////////////////
 //----------------------------------------------------------------------------------------------------------------------  
   
 void load_control(){
-  if ((sol_watts < MIN_SOL_WATTS) && (bat_volts > (LVD - deltaV))){// If the panel isn't producing, it's probably night
+  if ((sol_watts < 1) && (bat_volts > (LVD - deltaV))){            // If the panel isn't producing, it's probably night
     load_status = 1;                                               // record that the load is on
   }
   else if (bat_volts < (LVD - deltaV)){                            // If the battery voltage drops below the low voltage threshold
     digitalWrite(LOAD_PIN, HIGH);                                  // turn the load off
     load_status = 0;                                               // record that the load is off
   }  
-  else if (sol_watts > MIN_SOL_WATTS){                             // If the panel is producing, it's day time
+  else if (sol_watts > 1){                                         // If the panel is producing, it's day time
     digitalWrite(LOAD_PIN, HIGH);                                  // turn the load off
     load_status = 0;                                               // record that the load is off
   }
@@ -415,11 +337,13 @@ void print_data(void) {
   Serial.print(seconds,DEC);
   Serial.print("      ");
 
+ //no_battery, sleep, bulk, Float, error
   Serial.print("Charging = ");
-  if (charger_state == on) Serial.print("on   ");
-  else if (charger_state == off) Serial.print("off  ");
-  else if (charger_state == bulk) Serial.print("bulk ");
-  else if (charger_state == bat_float) Serial.print("float");
+  if (charger_state == no_battery) Serial.print("noBat");
+  else if (charger_state == sleep) Serial.print("sleep");
+  else if (charger_state == bulk) Serial.print("bulk");
+  else if (charger_state == Float) Serial.print("float");
+  else if (charger_state == error) Serial.print("error");
   Serial.print("      ");
 
   Serial.print("pwm = ");
@@ -518,14 +442,18 @@ void lcd_display()
  lcd.print(bat_volts);
  lcd.setCursor(8,2);
  
- if (charger_state == on) 
- lcd.print("on");
- else if (charger_state == off)
- lcd.print("off");
+ //no_battery, sleep, bulk, Float, error
+ 
+ if (charger_state == no_battery) 
+ lcd.print("no batt");
+ else if (charger_state == sleep)
+ lcd.print("sleep");
  else if (charger_state == bulk)
  lcd.print("bulk");
- else if (charger_state == bat_float)
+ else if (charger_state == Float)
  lcd.print("float");
+ else if (charger_state == error)
+ lcd.print("error");
  
  //-----------------------------------------------------------
  //--------------------Battery State Of Charge ---------------
